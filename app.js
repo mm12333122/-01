@@ -32,8 +32,10 @@ function loadStoredApiKey() {
 function persistApiKey(key) {
   try {
     localStorage.setItem(API_KEY_STORAGE, key);
+    return localStorage.getItem(API_KEY_STORAGE) === key;
   } catch (err) {
     console.warn('保存 API Key 到 localStorage 失败', err);
+    return false;
   }
 }
 function clearStoredApiKey() {
@@ -105,7 +107,7 @@ function card(l, compact = false) {
         ${canCheck ? `<button class="card-action mini" onclick="event.stopPropagation();openCheckin('${l.id}')">打卡</button>` : ''}
       </div>
     </div>
-    <div class="meta big" onclick="openRemarkEdit('${l.id}')">📅 ${fmtDate(l.date)}　⏰ ${timeText(l)}${l.location ? `　📍 ${esc(l.location)}` : ''}</div>
+    <div class="meta big" onclick="openRemarkEdit('${l.id}')">📅 ${fmtDate(l.date)}　⏰ ${timeText(l)}${l.location ? `　📍 ${esc(l.location)}` : ''}${l.registrationCount != null && l.registrationCount !== '' ? `　👥 ${esc(l.registrationCount)}人报名` : ''}</div>
     ${remarkHtml}
   </article>`;
 }
@@ -228,7 +230,7 @@ function go(p) { page = p; render(); window.scrollTo(0, 0); }
 function setPeriod(p) { period = p; render(); }
 function setListPage(key, step) { listPages[key] = Math.max(0, (listPages[key] || 0) + step); render(); }
 function modal(content) { $('#modal-layer').className = 'modal-layer open'; $('#modal-layer').innerHTML = `<div class="modal">${content}</div>`; }
-function closeModal() { $('#modal-layer').className = 'modal-layer'; $('#modal-layer').innerHTML = ''; }
+function closeModal() { stopCamera(); $('#modal-layer').className = 'modal-layer'; $('#modal-layer').innerHTML = ''; }
 function lectureForm(prefill = {}, title = '手动录入讲座', hint = '', editing = false) {
   modal(`<h2>${title}</h2>${hint ? `<div class="empty" style="text-align:left;margin-bottom:13px">${hint}</div>` : ''}
     <form onsubmit="${editing ? 'submitRemarkEdit(event' + `,'${prefill.id}'` + ')' : 'submitLecture(event)'}">
@@ -238,6 +240,7 @@ function lectureForm(prefill = {}, title = '手动录入讲座', hint = '', edit
         <label class="field"><span>开始时间 *</span><input required type="time" step="1" name="startTime" value="${prefill.startTime || ''}"></label>
         <label class="field"><span>结束时间</span><input type="time" step="1" name="endTime" value="${prefill.endTime || ''}"></label>
         <label class="field"><span>项目地点</span><input name="location" value="${esc(prefill.location || '')}" placeholder="如：活动中心"></label>
+        <label class="field"><span>报名数（可选）</span><input name="registrationCount" type="number" min="0" step="1" inputmode="numeric" value="${prefill.registrationCount ?? ''}" placeholder="如：30"></label>
       `}
       <label class="field"><span>备注</span><textarea name="remark" rows="3" placeholder="可记录讲师、内容要点等">${esc(prefill.remark || '')}</textarea></label>
       <div class="modal-actions">
@@ -284,19 +287,16 @@ async function submitLecture(e) {
     start_time: f.startTime,
     end_time: f.endTime || '',
     location: f.location || '',
+    registration_count: f.registrationCount === '' ? null : Number(f.registrationCount),
     remark
   };
   try {
     let { error } = await supabaseClient.from('lectures').insert(payload);
-    if (error && /column.*remark.*does not exist|remark/.test(error.message || '')) {
-      const { remark: _r, ...fallbackPayload } = payload;
-      ({ error } = await supabaseClient.from('lectures').insert(fallbackPayload));
-    }
     if (error) throw error;
     closeModal();
     toast('讲座已添加');
   } catch (err) {
-    toast(`添加失败：${esc(err.message || '请稍后重试')}`);
+    toast(`添加失败：${esc(err.message || '请先运行数据库字段迁移')}`);
   }
 }
 
@@ -307,10 +307,10 @@ function openApiSettings() {
 function saveApiKey(event) {
   event.preventDefault();
   deepseekApiKey = new FormData(event.target).get('apiKey').trim();
-  persistApiKey(deepseekApiKey);
+  const saved = persistApiKey(deepseekApiKey);
   closeModal();
   render();
-  toast('DeepSeek API Key 已保存在本浏览器');
+  toast(saved ? 'DeepSeek API Key 已保存在本浏览器' : '当前浏览器无法持久保存 Key，请关闭无痕模式或允许网站存储');
 }
 function clearApiKey() {
   if (!confirm('确定要清除已保存的 DeepSeek API Key 吗？清除后下次使用需重新输入。')) return;
@@ -321,8 +321,44 @@ function clearApiKey() {
   toast('API Key 已清除');
 }
 function openAIRecognition() {
+  stopCamera();
   if (!deepseekApiKey) { openApiSettings(); return; }
-  modal(`<h2>AI 图片识别</h2><label class="upload-box">▣<br><br>拍照或从相册选择图片<input type="file" accept="image/jpeg,image/png,image/gif,image/webp" onchange="recognizeLectureWithDeepSeek(event)"></label><div class="empty">图片将发送给 DeepSeek 的视觉模型，识别结果需要你确认后才会保存。</div><div class="modal-actions"><button class="cancel" onclick="closeModal()">取消</button></div>`);
+  modal(`<h2>AI 图片识别</h2>
+    <div class="empty" style="text-align:left">图片将发送给 DeepSeek 视觉模型识别，结果需要你确认后才保存。</div>
+    <button class="upload-box" type="button" onclick="startCamera()">📷<br><br>打开相机拍照</button>
+    <label class="upload-box">🖼️<br><br>从相册选择<input type="file" accept="image/*" onchange="recognizeLectureWithDeepSeek(event)"></label>
+    <div class="modal-actions"><button class="cancel" onclick="closeModal()">取消</button></div>`);
+}
+let cameraStream = null;
+async function startCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    toast('此浏览器不支持网页相机，请使用系统相机或相册');
+    return;
+  }
+  try {
+    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    modal(`<h2>拍摄讲座海报</h2><video id="camera-preview" class="camera-preview" autoplay playsinline muted></video><div class="modal-actions"><button class="cancel" type="button" onclick="openAIRecognition()">返回</button><button class="confirm" type="button" onclick="captureLecturePhoto()">拍照识别</button></div>`);
+    $('#camera-preview').srcObject = cameraStream;
+  } catch (error) {
+    toast('无法打开相机，请检查相机权限或使用相册选择');
+  }
+}
+function stopCamera() {
+  cameraStream?.getTracks().forEach(track => track.stop());
+  cameraStream = null;
+}
+function captureLecturePhoto() {
+  const video = $('#camera-preview');
+  if (!video?.videoWidth) { toast('相机尚未就绪'); return; }
+  const canvas = document.createElement('canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  stopCamera();
+  canvas.toBlob(blob => {
+    if (blob) recognizeLectureWithDeepSeek({ target: { files: [blob] } });
+    else toast('照片生成失败，请重试');
+  }, 'image/jpeg', 0.88);
 }
 function parseModelJson(content) {
   const source = String(content || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -343,6 +379,7 @@ async function recognizeLectureWithDeepSeek(event) {
   const file = event?.target?.files?.[0];
   if (!file) return;
   if (file.size > 32 * 1024 * 1024) { toast('图片不能超过 32MB'); return; }
+  stopCamera();
   modal(`<h2>AI 正在识别</h2><div class="empty">正在通过 DeepSeek 读取主标题、起止时间和项目地点…</div>`);
   try {
     const imageUrl = await fileAsDataUrl(file);
@@ -405,6 +442,7 @@ function normalizeLecture(row) {
     startTime: row.start_time,
     endTime: row.end_time || '',
     location: row.location || '',
+    registrationCount: row.registration_count == null ? '' : Number(row.registration_count),
     remark: row.remark || '',
     createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
   };
