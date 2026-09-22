@@ -13,43 +13,11 @@ const localDate = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toI
 const dateAdd = n => { const d = new Date(); d.setDate(d.getDate() + n); return localDate(d); };
 
 let state = { lectures: [], checkins: [] };
-const API_KEY_STORAGE = 'lecture-deepseek-key';
-function loadStoredApiKey() {
-  try {
-    const saved = localStorage.getItem(API_KEY_STORAGE);
-    if (saved) return saved;
-    // 兼容旧版本：Key 以前只存在 sessionStorage，读取后自动迁移到 localStorage
-    const legacy = sessionStorage.getItem(API_KEY_STORAGE);
-    if (legacy) {
-      localStorage.setItem(API_KEY_STORAGE, legacy);
-      return legacy;
-    }
-  } catch (err) {
-    console.warn('读取本地 API Key 失败', err);
-  }
-  return '';
-}
-function persistApiKey(key) {
-  try {
-    localStorage.setItem(API_KEY_STORAGE, key);
-    return localStorage.getItem(API_KEY_STORAGE) === key;
-  } catch (err) {
-    console.warn('保存 API Key 到 localStorage 失败', err);
-    return false;
-  }
-}
-function clearStoredApiKey() {
-  try {
-    localStorage.removeItem(API_KEY_STORAGE);
-    sessionStorage.removeItem(API_KEY_STORAGE);
-  } catch (err) {
-    console.warn('清除本地 API Key 失败', err);
-  }
-}
-let deepseekApiKey = loadStoredApiKey();
+let deepseekApiKey = localStorage.getItem('lecture-deepseek-key') || sessionStorage.getItem('lecture-deepseek-key') || '';
+if (deepseekApiKey) localStorage.setItem('lecture-deepseek-key', deepseekApiKey);
 let page = 'board', period = 'week';
 let listPages = { today: 0, future: 0, past: 0 };
-const PAGE_SIZE = 3;
+const PAGE_SIZE = 5;
 let loading = true;
 let realtimeChannels = [];
 const todayObj = new Date();
@@ -57,7 +25,13 @@ let calYear = todayObj.getFullYear();
 let calMonth = todayObj.getMonth() + 1;
 
 const USERS = ['A', 'B'];
-const userName = id => ({ A: '一二', B: '布布' }[id] || id);
+const defaultProfiles = { A: { name: '一二', avatar: '一' }, B: { name: '布布', avatar: '布' } };
+let userProfiles = (() => {
+  try { return { ...defaultProfiles, ...JSON.parse(localStorage.getItem('lecture-user-profiles') || '{}') }; }
+  catch (_) { return { ...defaultProfiles }; }
+})();
+const userName = id => userProfiles[id]?.name || defaultProfiles[id]?.name || id;
+const userAvatar = id => userProfiles[id]?.avatar || userName(id).slice(0, 1);
 const userColorClass = id => `user-${id}`;
 
 function showLoading(text = '正在连接云端数据…') {
@@ -87,27 +61,33 @@ function status(l) { return checks(l).length ? 'checked' : isEnded(l) ? 'missed'
 function checkinAvatars(l) {
   const cs = checks(l);
   if (!cs.length) return '';
-  return `<div class="checkin-avatars">${cs.map(c => `<div class="mini-avatar-wrap ${userColorClass(c.userId)}"><div class="mini-avatar">${userName(c.userId).slice(0, 1)}</div><span class="mini-count">${c.dataCount}</span></div>`).join('')}</div>`;
+  return `<div class="checkin-avatars">${cs.map(c => `<div class="mini-avatar-wrap ${userColorClass(c.userId)}"><div class="mini-avatar">${avatarHtml(c.userId)}</div><span class="mini-count">${c.dataCount}</span></div>`).join('')}</div>`;
 }
 
 function card(l, compact = false) {
   const cs = checks(l);
   const canCheck = l.date === dateAdd(0);
+  const isFuture = l.date > dateAdd(0) && !cs.length;
+  const [, month, day] = l.date.split('-');
   const title = esc(l.title);
+  const registrationHtml = l.registrationCount !== '' && l.registrationCount != null && Number.isFinite(Number(l.registrationCount)) && Number(l.registrationCount) >= 0
+    ? `<span class="registration-count">报名 ${Number(l.registrationCount)}</span>` : '';
   const remarkHtml = l.remark
     ? `<div class="lecture-remark" onclick="openRemarkEdit('${l.id}')" title="点击编辑备注">📝 ${esc(l.remark)}</div>`
     : `<div class="lecture-remark remark-empty" onclick="openRemarkEdit('${l.id}')" title="点击添加备注">📝 点击添加备注</div>`;
-  return `<article class="lecture-card ${compact ? 'compact' : ''}">
+  return `<article class="lecture-card ${compact ? 'compact' : ''} ${l.date === dateAdd(0) ? 'today-card' : ''} ${isFuture ? 'future-card' : ''}">
     <div class="title-line">
+      ${isFuture ? `<div class="future-date" aria-label="${month}月${day}日"><b>${day}</b><span>${Number(month)}月</span></div>` : ''}
       <div class="title-left" onclick="openRemarkEdit('${l.id}')">
         <h3 class="lecture-title">${title}</h3>
+        ${registrationHtml}
         ${checkinAvatars(l)}
       </div>
       <div class="title-right">
         ${canCheck ? `<button class="card-action mini" onclick="event.stopPropagation();openCheckin('${l.id}')">打卡</button>` : ''}
       </div>
     </div>
-    <div class="meta big" onclick="openRemarkEdit('${l.id}')">📅 ${fmtDate(l.date)}　⏰ ${timeText(l)}${l.location ? `　📍 ${esc(l.location)}` : ''}${l.registrationCount != null && l.registrationCount !== '' ? `　👥 ${esc(l.registrationCount)}人报名` : ''}</div>
+    <div class="meta big" onclick="openRemarkEdit('${l.id}')">${isFuture ? '' : `📅 ${fmtDate(l.date)}　`}⏰ ${timeText(l)}${l.location ? `　📍 ${esc(l.location)}` : ''}</div>
     ${remarkHtml}
   </article>`;
 }
@@ -131,7 +111,7 @@ function pager(items, key, size = PAGE_SIZE) {
 function section(title, items, empty, listKey = '', forceCompact = false) {
   const view = listKey ? pager(items, listKey) : { items, controls: '' };
   const hasItems = view.items.length > 0;
-  return `<section class="section"><div class="section-title">${title}<span>${items.length ? `${items.length} 场` : ''}</span></div>${hasItems ? `<div class="card-stack">${view.items.map(l => card(l, forceCompact)).join('')}</div>${view.controls}` : `<div class="empty">${empty}</div>`}</section>`;
+  return `<section class="section"><div class="section-title">${title}<span class="section-count">${items.length ? `<b>${items.length}</b> 场` : ''}</span></div>${hasItems ? `<div class="card-stack">${view.items.map(l => card(l, forceCompact)).join('')}</div>${view.controls}` : `<div class="empty">${empty}</div>`}</section>`;
 }
 function board() {
   const today = state.lectures.filter(l => l.date === dateAdd(0)).sort((a, b) => a.startTime.localeCompare(b.startTime));
@@ -170,6 +150,14 @@ function achievement() {
     return dt.getFullYear() === calYear && dt.getMonth() === calMonth - 1;
   });
   const calDaySet = new Set(calCheckins.map(c => c.checkInTime.slice(8, 10)));
+  const calCheckinCounts = calCheckins.reduce((counts, c) => {
+    const day = c.checkInTime.slice(8, 10);
+    counts[day] = (counts[day] || 0) + 1;
+    return counts;
+  }, {});
+  const lectureDaySet = new Set(state.lectures
+    .filter(l => l.date && l.date.slice(0, 4) === String(calYear) && Number(l.date.slice(5, 7)) === calMonth)
+    .map(l => l.date.slice(8, 10)));
   const monthTotalA = calCheckins.filter(c => c.userId === 'A').reduce((x, c) => x + Number(c.dataCount), 0);
   const monthTotalB = calCheckins.filter(c => c.userId === 'B').reduce((x, c) => x + Number(c.dataCount), 0);
 
@@ -189,7 +177,9 @@ function achievement() {
   for (let d = 1; d <= daysInMonth; d++) {
     const ds = String(d).padStart(2, '0');
     const checked = calDaySet.has(ds);
-    calCells.push(`<div class="cal-cell ${checked ? 'checked' : ''}">${d}</div>`);
+    const imported = lectureDaySet.has(ds);
+    const dayCount = calCheckinCounts[ds] || 0;
+    calCells.push(`<div class="cal-cell ${imported ? 'imported' : ''} ${checked ? 'checked' : ''}"><span>${d}</span>${dayCount ? `<b class="cal-count">${dayCount}</b>` : ''}</div>`);
   }
   const calendarHtml = `<div class="calendar-card">
     <div class="cal-header">
@@ -217,7 +207,7 @@ function achievement() {
 function setCalYear(v) { calYear = Number(v); render(); }
 function setCalMonth(v) { calMonth = Number(v); render(); }
 function mine() {
-  return `<header class="page-head"><div><h1>我的</h1><span class="today">基础设置</span></div></header><div class="identity"><i class="avatar">一二</i><div><strong>当前用户</strong><span>讲座打卡管理 App</span></div></div><div class="setting-group"><div class="setting"><span>当前身份</span><b>一二 / 布布</b></div><div class="setting"><span>DeepSeek API</span><button onclick="openApiSettings()">${deepseekApiKey ? '已连接 ›' : '配置 Key ›'}</button></div><div class="setting"><span>数据统计</span><button onclick="go('achievement')">查看成就 ›</button></div><div class="setting"><span>连接状态</span><b id="realtime-status">🔗 已连接实时同步</b></div><div class="setting"><span>关于 App</span><b>V1.0 · Supabase 云端版</b></div></div>`;
+  return `<header class="page-head"><div><h1>我的</h1><span class="today">基础设置</span></div></header><div class="identity"><i class="avatar">${avatarHtml('A')}</i><div><strong>${esc(userName('A'))} / ${esc(userName('B'))}</strong><span>讲座打卡管理 App</span></div></div><div class="setting-group"><div class="setting"><span>当前身份</span><b>${esc(userName('A'))} / ${esc(userName('B'))}</b></div><div class="setting"><span>头像与昵称</span><button onclick="openProfileSettings()">设置 ›</button></div><div class="setting"><span>DeepSeek API</span><button onclick="openApiSettings()">${deepseekApiKey ? '已连接 ›' : '配置 Key ›'}</button></div><div class="setting"><span>数据统计</span><button onclick="go('achievement')">查看成就 ›</button></div><div class="setting"><span>连接状态</span><b id="realtime-status">🔗 已连接实时同步</b></div><div class="setting"><span>关于 App</span><b>V1.0 · Supabase 云端版</b></div></div>`;
 }
 function nav() {
   return `<nav class="bottom-nav">${[['board', '▦', '看板'], ['achievement', '◉', '成就'], ['mine', '◌', '我的']].map(x => `<button class="nav-btn ${page === x[0] ? 'active' : ''}" onclick="go('${x[0]}')"><b>${x[1]}</b>${x[2]}</button>`).join('')}</nav>`;
@@ -230,7 +220,7 @@ function go(p) { page = p; render(); window.scrollTo(0, 0); }
 function setPeriod(p) { period = p; render(); }
 function setListPage(key, step) { listPages[key] = Math.max(0, (listPages[key] || 0) + step); render(); }
 function modal(content) { $('#modal-layer').className = 'modal-layer open'; $('#modal-layer').innerHTML = `<div class="modal">${content}</div>`; }
-function closeModal() { stopCamera(); $('#modal-layer').className = 'modal-layer'; $('#modal-layer').innerHTML = ''; }
+function closeModal() { $('#modal-layer').className = 'modal-layer'; $('#modal-layer').innerHTML = ''; }
 function lectureForm(prefill = {}, title = '手动录入讲座', hint = '', editing = false) {
   modal(`<h2>${title}</h2>${hint ? `<div class="empty" style="text-align:left;margin-bottom:13px">${hint}</div>` : ''}
     <form onsubmit="${editing ? 'submitRemarkEdit(event' + `,'${prefill.id}'` + ')' : 'submitLecture(event)'}">
@@ -240,9 +230,9 @@ function lectureForm(prefill = {}, title = '手动录入讲座', hint = '', edit
         <label class="field"><span>开始时间 *</span><input required type="time" step="1" name="startTime" value="${prefill.startTime || ''}"></label>
         <label class="field"><span>结束时间</span><input type="time" step="1" name="endTime" value="${prefill.endTime || ''}"></label>
         <label class="field"><span>项目地点</span><input name="location" value="${esc(prefill.location || '')}" placeholder="如：活动中心"></label>
-        <label class="field"><span>报名数（可选）</span><input name="registrationCount" type="number" min="0" step="1" inputmode="numeric" value="${prefill.registrationCount ?? ''}" placeholder="如：30"></label>
+        <label class="field"><span>报名数</span><input name="registrationCount" inputmode="numeric" type="number" min="0" step="1" value="${prefill.registrationCount ?? ''}" placeholder="可选"></label>
       `}
-      <label class="field"><span>备注</span><textarea name="remark" rows="3" placeholder="可记录讲师、内容要点等">${esc(prefill.remark || '')}</textarea></label>
+      <label class="field"><span>备注</span><textarea name="remark" rows="3" placeholder="可记录讲师、内容要点等">${esc(prefill.remark || '')}</textarea><button class="remark-quick" type="button" onclick="this.form.elements.remark.value='象山场';this.form.elements.remark.focus()">＋ 填入“象山场”</button></label>
       <div class="modal-actions">
         <button class="cancel" type="button" onclick="closeModal()">取消</button>
         <button class="confirm" type="submit">${editing ? '保存备注' : '确认添加'}</button>
@@ -287,85 +277,74 @@ async function submitLecture(e) {
     start_time: f.startTime,
     end_time: f.endTime || '',
     location: f.location || '',
-    registration_count: f.registrationCount === '' ? null : Number(f.registrationCount),
-    remark
+    remark,
+    registration_count: f.registrationCount === '' ? null : Number(f.registrationCount)
   };
   try {
     let { error } = await supabaseClient.from('lectures').insert(payload);
+    if (error && /column.*(remark|registration_count).*does not exist|(remark|registration_count)/.test(error.message || '')) {
+      const { remark: _r, registration_count: _rc, ...fallbackPayload } = payload;
+      ({ error } = await supabaseClient.from('lectures').insert(fallbackPayload));
+    }
     if (error) throw error;
     closeModal();
     toast('讲座已添加');
   } catch (err) {
-    toast(`添加失败：${esc(err.message || '请先运行数据库字段迁移')}`);
+    toast(`添加失败：${esc(err.message || '请稍后重试')}`);
   }
 }
 
 function openApiSettings() {
-  const hasKey = !!deepseekApiKey;
-  modal(`<h2>配置 DeepSeek API Key</h2><form onsubmit="saveApiKey(event)"><label class="field"><span>API Key</span><input required name="apiKey" type="password" autocomplete="off" value="${esc(deepseekApiKey)}" placeholder="sk-..."></label><div class="empty" style="text-align:left">Key 保存在本浏览器（localStorage），下次打开会自动填充，无需重复输入；图片与识别指令将发送至 DeepSeek API 用于真实识别。</div><div class="modal-actions">${hasKey ? '<button class="danger" type="button" onclick="clearApiKey()">清除 Key</button>' : ''}<button class="cancel" type="button" onclick="closeModal()">取消</button><button class="confirm" type="submit">${hasKey ? '更换并连接' : '保存并连接'}</button></div></form>`);
+  modal(`<h2>配置 DeepSeek API Key</h2><form onsubmit="saveApiKey(event)"><label class="field"><span>API Key</span><input required name="apiKey" type="password" autocomplete="off" value="${esc(deepseekApiKey)}" placeholder="sk-..."></label><div class="empty" style="text-align:left">Key 会保存在本浏览器中；图片与识别指令将发送至 DeepSeek API 用于真实识别。</div><div class="modal-actions"><button class="cancel" type="button" onclick="closeModal()">取消</button><button class="confirm" type="submit">保存并连接</button></div></form>`);
 }
 function saveApiKey(event) {
   event.preventDefault();
   deepseekApiKey = new FormData(event.target).get('apiKey').trim();
-  const saved = persistApiKey(deepseekApiKey);
+  localStorage.setItem('lecture-deepseek-key', deepseekApiKey);
+  sessionStorage.removeItem('lecture-deepseek-key');
   closeModal();
   render();
-  toast(saved ? 'DeepSeek API Key 已保存在本浏览器' : '当前浏览器无法持久保存 Key，请关闭无痕模式或允许网站存储');
-}
-function clearApiKey() {
-  if (!confirm('确定要清除已保存的 DeepSeek API Key 吗？清除后下次使用需重新输入。')) return;
-  deepseekApiKey = '';
-  clearStoredApiKey();
-  closeModal();
-  render();
-  toast('API Key 已清除');
+  toast('DeepSeek API Key 已保存');
 }
 function openAIRecognition() {
-  stopCamera();
   if (!deepseekApiKey) { openApiSettings(); return; }
-  modal(`<h2>AI 图片识别</h2>
-    <div class="empty" style="text-align:left">图片将发送给 DeepSeek 视觉模型识别，结果需要你确认后才保存。</div>
-    <button class="upload-box" type="button" onclick="startCamera()">📷<br><br>打开相机拍照</button>
-    <label class="upload-box">🖼️<br><br>从相册选择<input type="file" accept="image/*" onchange="recognizeLectureWithDeepSeek(event)"></label>
-    <div class="modal-actions"><button class="cancel" onclick="closeModal()">取消</button></div>`);
+  modal(`<h2>AI 图片识别</h2><div class="upload-options"><button type="button" class="upload-box upload-option" onclick="openCameraCapture()">拍照识别</button><label class="upload-box upload-option">从相册选择<input type="file" accept="image/*" onchange="recognizeLectureWithDeepSeek(event)"></label></div><div class="empty">图片将发送给 DeepSeek 的视觉模型，识别结果需要你确认后才会保存。</div><div class="modal-actions"><button class="cancel" onclick="closeModal()">取消</button></div>`);
 }
 let cameraStream = null;
-async function startCamera() {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    toast('此浏览器不支持网页相机，请使用系统相机或相册');
-    return;
-  }
+async function openCameraCapture() {
+  if (!navigator.mediaDevices?.getUserMedia) { toast('当前浏览器不支持摄像头，请使用相册选择'); return; }
   try {
     cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
-    modal(`<h2>拍摄讲座海报</h2><video id="camera-preview" class="camera-preview" autoplay playsinline muted></video><div class="modal-actions"><button class="cancel" type="button" onclick="openAIRecognition()">返回</button><button class="confirm" type="button" onclick="captureLecturePhoto()">拍照识别</button></div>`);
+    modal(`<h2>拍照识别</h2><video class="camera-preview" id="camera-preview" autoplay playsinline></video><canvas id="camera-canvas" hidden></canvas><div class="modal-actions"><button class="cancel" type="button" onclick="closeCameraCapture()">取消</button><button class="confirm" type="button" onclick="captureCameraImage()">拍摄并识别</button></div>`);
     $('#camera-preview').srcObject = cameraStream;
   } catch (error) {
-    toast('无法打开相机，请检查相机权限或使用相册选择');
+    cameraStream = null;
+    toast(error.name === 'NotAllowedError' ? '请允许浏览器使用摄像头' : '摄像头启动失败，请检查设备权限');
   }
 }
-function stopCamera() {
+function closeCameraCapture() {
   cameraStream?.getTracks().forEach(track => track.stop());
   cameraStream = null;
+  openAIRecognition();
 }
-function captureLecturePhoto() {
+function captureCameraImage() {
   const video = $('#camera-preview');
-  if (!video?.videoWidth) { toast('相机尚未就绪'); return; }
-  const canvas = document.createElement('canvas');
+  const canvas = $('#camera-canvas');
+  if (!video?.videoWidth) { toast('摄像头还未准备好'); return; }
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
-  canvas.getContext('2d').drawImage(video, 0, 0);
-  stopCamera();
-  canvas.toBlob(blob => {
-    if (blob) recognizeLectureWithDeepSeek({ target: { files: [blob] } });
-    else toast('照片生成失败，请重试');
-  }, 'image/jpeg', 0.88);
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  cameraStream?.getTracks().forEach(track => track.stop());
+  cameraStream = null;
+  canvas.toBlob(blob => recognizeLectureWithDeepSeek({ target: { files: [new File([blob], 'camera-photo.jpg', { type: 'image/jpeg' })] } }), 'image/jpeg', .92);
 }
 function parseModelJson(content) {
   const source = String(content || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   const match = source.match(/\{[\s\S]*\}/);
   if (!match) throw new Error('模型未返回 JSON');
   const data = JSON.parse(match[0]);
-  return { title: String(data.title || ''), date: String(data.date || ''), startTime: String(data.startTime || ''), endTime: String(data.endTime || ''), location: String(data.location || ''), remark: String(data.remark || '') };
+  const registrationCount = data.registrationCount ?? data.registration_count;
+  return { title: String(data.title || ''), date: String(data.date || ''), startTime: String(data.startTime || ''), endTime: String(data.endTime || ''), location: String(data.location || ''), registrationCount: registrationCount === '' || registrationCount == null ? '' : Math.max(0, Number(registrationCount) || 0), remark: String(data.remark || '') };
 }
 function fileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -379,11 +358,10 @@ async function recognizeLectureWithDeepSeek(event) {
   const file = event?.target?.files?.[0];
   if (!file) return;
   if (file.size > 32 * 1024 * 1024) { toast('图片不能超过 32MB'); return; }
-  stopCamera();
   modal(`<h2>AI 正在识别</h2><div class="empty">正在通过 DeepSeek 读取主标题、起止时间和项目地点…</div>`);
   try {
     const imageUrl = await fileAsDataUrl(file);
-    const prompt = `请严格读取这张讲座海报，并且只返回一个 JSON 对象，不能使用 Markdown。字段必须为 title、date、startTime、endTime、location。title：只读取海报主标题区域的原文，不要从正文、主办方或上下文猜测。date、startTime、endTime：只能读取"起止时间"字段；date 输出 YYYY-MM-DD，startTime/endTime 输出图片中的原始 24 小时制时间，可保留秒数。location：只能读取"项目地点"字段后的原文。任何字段在图片中看不清或不存在时填空字符串；绝不编造或推测。`;
+    const prompt = `请严格读取这张讲座海报，并且只返回一个 JSON 对象，不能使用 Markdown。字段必须为 title、date、startTime、endTime、location、registrationCount。title：只读取海报主标题区域的原文，不要从正文、主办方或上下文猜测。date、startTime、endTime：只能读取"起止时间"字段；date 输出 YYYY-MM-DD，startTime/endTime 输出图片中的原始 24 小时制时间，可保留秒数。location：只能读取"项目地点"字段后的原文。registrationCount：只读取海报明确标注的报名数/报名人数，无法确认时返回空字符串。任何字段在图片中看不清或不存在时填空字符串；绝不编造或推测。`;
     const response = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${deepseekApiKey}` },
@@ -401,6 +379,39 @@ function openCheckin(id) {
   const l = state.lectures.find(x => x.id === id);
   if (!l) { toast('讲座不存在'); return; }
   modal(`<h2>打卡</h2><div class="empty" style="text-align:left">${esc(l.title)}<br><span style="color:#8a98aa;font-size:12px">${fmtDate(l.date)} · ${timeText(l)}</span></div><form onsubmit="submitCheckin(event,'${id}')"><div class="field"><span>打卡人 *</span><div class="radio-row"><label class="radio"><input type="radio" name="userId" value="A" required>一二</label><label class="radio"><input type="radio" name="userId" value="B">布布</label></div></div><label class="field"><span>打卡量 *</span><input required name="dataCount" inputmode="decimal" type="number" min="0" step="any" placeholder="请输入非负数字"></label><div class="modal-actions"><button class="cancel" type="button" onclick="closeModal()">取消</button><button class="confirm" type="submit">确认打卡</button></div></form>`);
+}
+
+function openProfileSettings() {
+  modal(`<h2>头像与昵称</h2><div class="profile-edit-grid">${USERS.map(id => `<div class="profile-edit"><strong>${esc(userName(id))}</strong><div class="profile-avatar-preview" id="avatar-preview-${id}">${avatarHtml(id)}</div><label class="field"><span>头像图片</span><input class="profile-avatar-file" type="file" accept="image/*" onchange="selectAvatarImage(event,'${id}')"><input type="hidden" name="avatar-${id}" value="${esc(userAvatar(id))}"></label><label class="field"><span>昵称</span><input name="name-${id}" maxlength="12" value="${esc(userName(id))}" placeholder="请输入昵称"></label></div>`).join('')}</div><div class="modal-actions"><button class="cancel" type="button" onclick="closeModal()">取消</button><button class="confirm" type="button" onclick="saveProfileSettings(this)">保存设置</button></div>`);
+}
+function avatarHtml(id) {
+  const avatar = userAvatar(id);
+  return String(avatar).startsWith('data:image/') ? `<img src="${avatar}" alt="${esc(userName(id))}头像">` : esc(avatar);
+}
+function selectAvatarImage(event, id) {
+  const file = event.target.files?.[0];
+  if (!file || !file.type.startsWith('image/')) return;
+  if (file.size > 5 * 1024 * 1024) { toast('头像图片不能超过 5MB'); event.target.value = ''; return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const value = String(reader.result);
+    const modalEl = event.target.closest('.modal');
+    modalEl.querySelector(`[name="avatar-${id}"]`).value = value;
+    modalEl.querySelector(`#avatar-preview-${id}`).innerHTML = `<img src="${value}" alt="头像预览">`;
+  };
+  reader.readAsDataURL(file);
+}
+function saveProfileSettings(button) {
+  const modalEl = button.closest('.modal');
+  USERS.forEach(id => {
+    const name = modalEl.querySelector(`[name="name-${id}"]`).value.trim() || defaultProfiles[id].name;
+    const avatar = modalEl.querySelector(`[name="avatar-${id}"]`).value.trim() || name.slice(0, 1);
+    userProfiles[id] = { name, avatar };
+  });
+  localStorage.setItem('lecture-user-profiles', JSON.stringify(userProfiles));
+  closeModal();
+  render();
+  toast('头像与昵称已保存');
 }
 
 async function submitCheckin(e, id) {
@@ -442,8 +453,8 @@ function normalizeLecture(row) {
     startTime: row.start_time,
     endTime: row.end_time || '',
     location: row.location || '',
-    registrationCount: row.registration_count == null ? '' : Number(row.registration_count),
     remark: row.remark || '',
+    registrationCount: row.registration_count == null ? '' : Number(row.registration_count),
     createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
   };
 }
