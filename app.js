@@ -85,6 +85,7 @@ function card(l, compact = false) {
       </div>
       <div class="title-right">
         ${canCheck ? `<button class="card-action mini" onclick="event.stopPropagation();openCheckin('${l.id}')">打卡</button>` : ''}
+        <button class="card-action mini" onclick="event.stopPropagation();openLectureEdit('${l.id}')">编辑</button>
       </div>
     </div>
     <div class="meta big" onclick="openRemarkEdit('${l.id}')">${isFuture ? '' : `📅 ${fmtDate(l.date)}　`}⏰ ${timeText(l)}${l.location ? `　📍 ${esc(l.location)}` : ''}</div>
@@ -222,9 +223,12 @@ function setListPage(key, step) { listPages[key] = Math.max(0, (listPages[key] |
 function modal(content) { $('#modal-layer').className = 'modal-layer open'; $('#modal-layer').innerHTML = `<div class="modal">${content}</div>`; }
 function closeModal() { $('#modal-layer').className = 'modal-layer'; $('#modal-layer').innerHTML = ''; }
 function lectureForm(prefill = {}, title = '手动录入讲座', hint = '', editing = false) {
+  const isFull = editing === 'full';
+  const isRemark = !!editing && !isFull;
+  const submitAction = isFull ? `submitLectureUpdate(event,'${prefill.id}')` : isRemark ? `submitRemarkEdit(event,'${prefill.id}')` : 'submitLecture(event)';
   modal(`<h2>${title}</h2>${hint ? `<div class="empty" style="text-align:left;margin-bottom:13px">${hint}</div>` : ''}
-    <form onsubmit="${editing ? 'submitRemarkEdit(event' + `,'${prefill.id}'` + ')' : 'submitLecture(event)'}">
-      ${editing ? '' : `
+    <form onsubmit="${submitAction}">
+      ${isRemark ? '' : `
         <label class="field"><span>讲座主题 *</span><input required name="title" value="${esc(prefill.title || '')}" placeholder="请输入讲座主题"></label>
         <label class="field"><span>日期 *</span><input required type="date" name="date" value="${prefill.date || dateAdd(0)}"></label>
         <label class="field"><span>开始时间 *</span><input required type="time" step="1" name="startTime" value="${prefill.startTime || ''}"></label>
@@ -234,8 +238,9 @@ function lectureForm(prefill = {}, title = '手动录入讲座', hint = '', edit
       `}
       <label class="field"><span>备注</span><textarea name="remark" rows="3" placeholder="可记录讲师、内容要点等">${esc(prefill.remark || '')}</textarea><button class="remark-quick" type="button" onclick="this.form.elements.remark.value='象山场';this.form.elements.remark.focus()">＋ 填入“象山场”</button></label>
       <div class="modal-actions">
+        ${isFull ? `<button class="cancel" type="button" style="color:#e5484d" onclick="deleteLecture('${prefill.id}')">删除讲座</button>` : ''}
         <button class="cancel" type="button" onclick="closeModal()">取消</button>
-        <button class="confirm" type="submit">${editing ? '保存备注' : '确认添加'}</button>
+        <button class="confirm" type="submit">${isFull ? '保存修改' : isRemark ? '保存备注' : '确认添加'}</button>
       </div>
     </form>`);
 }
@@ -259,6 +264,61 @@ async function submitRemarkEdit(e, id) {
     if (!loading) render();
   } catch (err) {
     toast(`保存失败：${esc(err.message || '请稍后重试')}`);
+  }
+}
+function openLectureEdit(id) {
+  const l = state.lectures.find(x => x.id === id);
+  if (!l) { toast('讲座不存在'); return; }
+  lectureForm({ id: l.id, title: l.title, date: l.date, startTime: l.startTime, endTime: l.endTime, location: l.location, registrationCount: l.registrationCount, remark: l.remark }, '编辑讲座', '', 'full');
+}
+async function submitLectureUpdate(e, id) {
+  e.preventDefault();
+  const f = Object.fromEntries(new FormData(e.target));
+  if (state.lectures.some(lecture => lecture.id !== id && lectureFingerprint(lecture) === lectureFingerprint(f))) {
+    toast('相同的讲座已存在，无需重复录入。');
+    return;
+  }
+  const payload = {
+    title: f.title.trim(),
+    lecture_date: f.date,
+    start_time: f.startTime,
+    end_time: f.endTime || '',
+    location: f.location || '',
+    remark: (f.remark || '').trim(),
+    registration_count: f.registrationCount === '' ? null : Number(f.registrationCount)
+  };
+  try {
+    let { error } = await supabaseClient.from('lectures').update(payload).eq('id', id);
+    if (error && /column.*(remark|registration_count).*does not exist|(remark|registration_count)/.test(error.message || '')) {
+      const { remark: _r, registration_count: _rc, ...fallbackPayload } = payload;
+      ({ error } = await supabaseClient.from('lectures').update(fallbackPayload).eq('id', id));
+    }
+    if (error) throw error;
+    const local = state.lectures.find(x => x.id === id);
+    if (local) Object.assign(local, { title: payload.title, date: payload.lecture_date, startTime: payload.start_time, endTime: payload.end_time, location: payload.location, remark: payload.remark, registrationCount: payload.registration_count == null ? '' : payload.registration_count });
+    closeModal();
+    toast('讲座已更新');
+    if (!loading) render();
+  } catch (err) {
+    toast(`保存失败：${esc(err.message || '请稍后重试')}`);
+  }
+}
+async function deleteLecture(id) {
+  const l = state.lectures.find(x => x.id === id);
+  if (!l) { toast('讲座不存在'); return; }
+  if (!confirm(`确定删除讲座「${l.title}」吗？其打卡记录将一并删除，无法恢复。`)) return;
+  closeModal();
+  try {
+    const { error: cerr } = await supabaseClient.from('checkins').delete().eq('lecture_id', id);
+    if (cerr) throw cerr;
+    const { error } = await supabaseClient.from('lectures').delete().eq('id', id);
+    if (error) throw error;
+    state.lectures = state.lectures.filter(x => x.id !== id);
+    state.checkins = state.checkins.filter(c => c.lectureId !== id);
+    toast('讲座已删除');
+    if (!loading) render();
+  } catch (err) {
+    toast(`删除失败：${esc(err.message || '请稍后重试')}`);
   }
 }
 function lectureFingerprint(lecture) { return ['title', 'date', 'startTime', 'endTime', 'location'].map(key => String(lecture[key] || '').trim().replace(/\s+/g, ' ').toLowerCase()).join('|'); }
